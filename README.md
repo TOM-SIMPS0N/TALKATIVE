@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="TALKATIVE_banner.png" alt="TALKATIVE banner" width="100%">
+  <img src="assets/TALKATIVE_banner.png" alt="TALKATIVE banner" width="100%">
 </p>
 
 # TALKATIVE
