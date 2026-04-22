@@ -17,7 +17,7 @@ TALKATIVE is a free, local speech-to-text tool that types out what you say.
 
 ## Active Languages
 - **English (`en`)**: Currently active by default through the `small.en` Whisper model.
-- **Czech (`cs`)**: Available from the system tray language menu. The first Czech use downloads the multilingual `medium` Whisper model for better accuracy.
+- **Czech (`cs`)**: Available from the system tray language menu. The first Czech use downloads the multilingual `turbo` Whisper model.
 
 English remains the default language when TALKATIVE starts.
 

@@ -14,6 +14,7 @@ import queue
 import time
 import random
 from faster_whisper import WhisperModel
+from faster_whisper.utils import _MODELS as FASTER_WHISPER_MODELS
 from huggingface_hub import snapshot_download
 from huggingface_hub.utils import disable_progress_bars
 
@@ -22,7 +23,7 @@ from PyQt6.QtGui import QFont, QIcon, QPainter, QPixmap, QColor, QLinearGradient
 from PyQt6.QtCore import pyqtSignal, QObject, QRect, QRectF, Qt, QTimer, QPropertyAnimation, QEasingCurve, QPoint, QPointF, QParallelAnimationGroup
 
 ENGLISH_MODEL_NAME = os.getenv("TALKATIVE_MODEL", "small.en")
-CZECH_MODEL_NAME = os.getenv("TALKATIVE_CZECH_MODEL", "medium")
+CZECH_MODEL_NAME = os.getenv("TALKATIVE_CZECH_MODEL", "turbo")
 MODEL_DEVICE = os.getenv("TALKATIVE_DEVICE", "").strip().lower()
 CPU_THREADS = max(1, (os.cpu_count() or 4) - 1)
 HOTKEY = "ctrl+alt"
@@ -229,7 +230,14 @@ def resolve_model_reference(model_name):
     if "/" in model_name:
         return model_name
 
+    if model_name in FASTER_WHISPER_MODELS:
+        return FASTER_WHISPER_MODELS[model_name]
+
     return f"Systran/faster-whisper-{model_name}"
+
+
+def model_snapshot_has_weights(snapshot_path):
+    return os.path.isfile(os.path.join(snapshot_path, "model.bin"))
 
 
 def resolve_model_source(model_name):
@@ -246,8 +254,11 @@ def resolve_model_source(model_name):
             cache_dir=MODEL_CACHE_DIR,
             local_files_only=True,
         )
-        logging.info("Resolved Whisper model from local cache: %s", cached_snapshot)
-        return cached_snapshot
+        if model_snapshot_has_weights(cached_snapshot):
+            logging.info("Resolved Whisper model from local cache: %s", cached_snapshot)
+            return cached_snapshot
+
+        raise FileNotFoundError(f"Cached Whisper model snapshot is incomplete: {cached_snapshot}")
     except Exception as cache_error:
         if not ALLOW_MODEL_DOWNLOAD:
             raise RuntimeError(
@@ -261,6 +272,9 @@ def resolve_model_source(model_name):
             cache_dir=MODEL_CACHE_DIR,
             local_files_only=False,
         )
+        if not model_snapshot_has_weights(downloaded_snapshot):
+            raise RuntimeError(f"Downloaded Whisper model snapshot is incomplete: {downloaded_snapshot}")
+
         logging.info("Downloaded Whisper model to local cache: %s", downloaded_snapshot)
         return downloaded_snapshot
 
