@@ -21,7 +21,7 @@ from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QWidget, QVBox
 from PyQt6.QtGui import QFont, QIcon, QPainter, QPixmap, QColor, QLinearGradient, QPen, QRadialGradient, QPainterPath, QRegion
 from PyQt6.QtCore import pyqtSignal, QObject, QRect, QRectF, Qt, QTimer, QPropertyAnimation, QEasingCurve, QPoint, QPointF, QParallelAnimationGroup
 
-ENGLISH_MODEL_NAME = os.getenv("TALKATIVE_MODEL", "base.en")
+ENGLISH_MODEL_NAME = os.getenv("TALKATIVE_MODEL", "small.en")
 CZECH_MODEL_NAME = os.getenv("TALKATIVE_CZECH_MODEL", "medium")
 MODEL_DEVICE = os.getenv("TALKATIVE_DEVICE", "").strip().lower()
 CPU_THREADS = max(1, (os.cpu_count() or 4) - 1)
@@ -46,7 +46,16 @@ LANGUAGE_CONFIGS = {
         "model_name": ENGLISH_MODEL_NAME,
         "hotwords": HOTWORDS,
         "cleanup": "english",
-        "transcribe_options": {"beam_size": 2, "best_of": 2},
+        "transcribe_options": {
+            "beam_size": 2,
+            "best_of": 2,
+            "condition_on_previous_text": True,
+            "vad_parameters": {
+                "threshold": 0.3,
+                "min_silence_duration_ms": 600,
+                "speech_pad_ms": 250,
+            },
+        },
     },
     "cs": {
         "label": "Czech",
