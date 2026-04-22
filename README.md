@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="TALKATIVE_banner.png" alt="TALKATIVE banner" width="100%">
+</p>
+
 # TALKATIVE
 
 TALKATIVE is a free, local speech-to-text tool that types out what you say.
