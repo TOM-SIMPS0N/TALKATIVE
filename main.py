@@ -17,7 +17,8 @@ from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QWidget, QVBox
 from PyQt6.QtGui import QFont, QIcon, QPainter, QPixmap, QColor, QLinearGradient, QPen, QRadialGradient, QPainterPath, QRegion
 from PyQt6.QtCore import pyqtSignal, QObject, QRect, QRectF, Qt, QTimer, QPropertyAnimation, QEasingCurve, QPoint, QPointF, QParallelAnimationGroup
 
-MODEL_NAME = os.getenv("TALKATIVE_MODEL", "base.en")
+ENGLISH_MODEL_NAME = os.getenv("TALKATIVE_MODEL", "base.en")
+CZECH_MODEL_NAME = os.getenv("TALKATIVE_CZECH_MODEL", "base")
 MODEL_DEVICE = os.getenv("TALKATIVE_DEVICE", "").strip().lower()
 CPU_THREADS = max(1, (os.cpu_count() or 4) - 1)
 HOTKEY = "ctrl+alt"
@@ -33,14 +34,34 @@ ALLOW_MODEL_DOWNLOAD = os.getenv("TALKATIVE_ALLOW_MODEL_DOWNLOAD", "1").strip().
     "no",
 }
 HOTWORDS = "Codex, TALKATIVE, VPS, BTC, Bitcoin, Ethereum, ETH, SOL, Solana, Dogecoin"
-TRANSCRIBE_OPTIONS = {
+LANGUAGE_ORDER = ("en", "cs")
+LANGUAGE_CONFIGS = {
+    "en": {
+        "label": "English",
+        "whisper_language": "en",
+        "model_name": ENGLISH_MODEL_NAME,
+        "hotwords": HOTWORDS,
+    },
+    "cs": {
+        "label": "Czech",
+        "whisper_language": "cs",
+        # Czech needs a multilingual Whisper model. The *.en models only handle English.
+        "model_name": CZECH_MODEL_NAME,
+        "hotwords": "",
+    },
+}
+LANGUAGE_ALIASES = {
+    "english": "en",
+    "czech": "cs",
+    "cz": "cs",
+}
+DEFAULT_LANGUAGE_CODE = os.getenv("TALKATIVE_LANGUAGE", "en").strip().lower()
+BASE_TRANSCRIBE_OPTIONS = {
     "beam_size": 1,
     "best_of": 1,
-    "language": "en",
     "temperature": 0.0,
     "condition_on_previous_text": False,
     "without_timestamps": True,
-    "hotwords": HOTWORDS,
     "vad_filter": True,
     "vad_parameters": {"min_silence_duration_ms": 300},
 }
@@ -154,18 +175,36 @@ def build_model_load_candidates():
     return [{"device": "cpu", "compute_type": "int8", "cpu_threads": CPU_THREADS}]
 
 
-def resolve_model_reference():
-    if os.path.exists(MODEL_NAME):
-        return os.path.abspath(MODEL_NAME)
-
-    if "/" in MODEL_NAME:
-        return MODEL_NAME
-
-    return f"Systran/faster-whisper-{MODEL_NAME}"
+def normalize_language_code(language_code):
+    code = (language_code or "en").strip().lower()
+    code = LANGUAGE_ALIASES.get(code, code)
+    return code if code in LANGUAGE_CONFIGS else "en"
 
 
-def resolve_model_source():
-    model_reference = resolve_model_reference()
+def get_language_config(language_code):
+    return LANGUAGE_CONFIGS[normalize_language_code(language_code)]
+
+
+def build_transcribe_options(language_config):
+    options = dict(BASE_TRANSCRIBE_OPTIONS)
+    options["language"] = language_config["whisper_language"]
+    if language_config["hotwords"]:
+        options["hotwords"] = language_config["hotwords"]
+    return options
+
+
+def resolve_model_reference(model_name):
+    if os.path.exists(model_name):
+        return os.path.abspath(model_name)
+
+    if "/" in model_name:
+        return model_name
+
+    return f"Systran/faster-whisper-{model_name}"
+
+
+def resolve_model_source(model_name):
+    model_reference = resolve_model_reference(model_name)
 
     if os.path.exists(model_reference):
         logging.info("Loading Whisper model from local path: %s", model_reference)
@@ -183,7 +222,7 @@ def resolve_model_source():
     except Exception as cache_error:
         if not ALLOW_MODEL_DOWNLOAD:
             raise RuntimeError(
-                f"Whisper model {MODEL_NAME!r} is not available in local cache and downloads are disabled."
+                f"Whisper model {model_name!r} is not available in local cache and downloads are disabled."
             ) from cache_error
 
         logging.info("Model cache miss for %s. Downloading once to local cache.", model_reference)
@@ -406,26 +445,43 @@ class TalkativeApp:
         self.comm.update_icon.connect(self.set_icon_state)
         self.comm.insert_text.connect(self.type_transcribed_text)
 
-        # UI Elements
-        self.tray_icon = QSystemTrayIcon(self.app)
-        self.recording_indicator = RecordingIndicator()
-        
-        self.set_icon_state("idle")
-        
-        self.menu = QMenu()
-        quit_action = self.menu.addAction("Quit")
-        quit_action.triggered.connect(self.quit_app)
-        self.tray_icon.setContextMenu(self.menu)
-        self.tray_icon.show()
-
         # State
         self.state = "idle" # idle, recording, processing
+        self.current_language_code = normalize_language_code(DEFAULT_LANGUAGE_CODE)
+        self.model = None
+        self.model_language_code = None
+        self.model_load_generation = 0
         self.audio_queue = queue.Queue()
         self.recording = False
         self.samplerate = 16000
         self.audio_data = []
         self.current_amplitude = 0.0
-        
+
+        # UI Elements
+        self.tray_icon = QSystemTrayIcon(self.app)
+        self.recording_indicator = RecordingIndicator()
+
+        self.menu = QMenu()
+        self.language_menu = self.menu.addMenu("Language")
+        self.language_actions = {}
+        for language_code in LANGUAGE_ORDER:
+            language_config = get_language_config(language_code)
+            language_action = self.language_menu.addAction(language_config["label"])
+            language_action.setCheckable(True)
+            language_action.triggered.connect(
+                lambda checked=False, code=language_code: self.set_language(code)
+            )
+            self.language_actions[language_code] = language_action
+        self.update_language_menu()
+
+        self.menu.addSeparator()
+        quit_action = self.menu.addAction("Quit")
+        quit_action.triggered.connect(self.quit_app)
+        self.tray_icon.setContextMenu(self.menu)
+        self.tray_icon.show()
+
+        self.set_icon_state("idle")
+
         # Auto-timeout timer (60 seconds) to prevent accidental long recordings
         self.timeout_timer = QTimer()
         self.timeout_timer.setSingleShot(True)
@@ -436,11 +492,41 @@ class TalkativeApp:
         self.anim_timer.start(30)
 
         # Load Whisper model in a background thread to avoid freezing UI
-        self.model = None
-        threading.Thread(target=self.load_model, daemon=True).start()
+        self.load_model_async()
 
         # Setup global hotkey
         keyboard.add_hotkey(HOTKEY, self.on_hotkey)
+
+    def get_current_language_config(self):
+        return get_language_config(self.current_language_code)
+
+    def update_language_menu(self):
+        for language_code, action in self.language_actions.items():
+            action.setChecked(language_code == self.current_language_code)
+
+    def set_language(self, language_code):
+        language_code = normalize_language_code(language_code)
+        if language_code == self.current_language_code:
+            self.update_language_menu()
+            return
+
+        if self.state != "idle":
+            logging.info("Language switch ignored while app is %s.", self.state)
+            self.update_language_menu()
+            return
+
+        self.current_language_code = language_code
+        self.model = None
+        self.model_language_code = None
+        self.update_language_menu()
+        logging.info("Language changed to %s.", self.get_current_language_config()["label"])
+        self.load_model_async()
+
+    def load_model_async(self):
+        self.model_load_generation += 1
+        generation = self.model_load_generation
+        language_code = self.current_language_code
+        threading.Thread(target=self.load_model, args=(language_code, generation), daemon=True).start()
 
     def update_indicator_amplitude(self):
         if self.recording:
@@ -450,23 +536,28 @@ class TalkativeApp:
         else:
             self.recording_indicator.set_amplitude(0.0)
 
-    def load_model(self):
+    def load_model(self, language_code, generation):
         load_started_at = time.perf_counter()
+        language_config = get_language_config(language_code)
+        model_name = language_config["model_name"]
+        loaded_model = None
         self.comm.update_icon.emit("processing")
         try:
-            model_source = resolve_model_source()
+            model_source = resolve_model_source(model_name)
         except Exception:
-            logging.error("Failed to resolve Whisper model source for %s.", MODEL_NAME, exc_info=True)
-            self.comm.update_icon.emit("idle")
+            logging.error("Failed to resolve Whisper model source for %s.", model_name, exc_info=True)
+            if generation == self.model_load_generation:
+                self.comm.update_icon.emit("idle")
             return
 
         for model_options in build_model_load_candidates():
             try:
-                self.model = WhisperModel(model_source, local_files_only=True, **model_options)
+                loaded_model = WhisperModel(model_source, local_files_only=True, **model_options)
                 logging.info(
-                    "Model loaded successfully in %.2fs: %s with device=%s compute_type=%s",
+                    "Model loaded successfully in %.2fs: %s for %s with device=%s compute_type=%s",
                     time.perf_counter() - load_started_at,
-                    MODEL_NAME,
+                    model_name,
+                    language_config["label"],
                     model_options["device"],
                     model_options["compute_type"],
                 )
@@ -474,13 +565,20 @@ class TalkativeApp:
             except Exception:
                 logging.warning(
                     "Model load attempt failed for %s with %s",
-                    MODEL_NAME,
+                    model_name,
                     model_options,
                     exc_info=True,
                 )
 
+        if generation != self.model_load_generation:
+            logging.info("Discarding stale model load for %s.", language_config["label"])
+            return
+
+        self.model = loaded_model
+        self.model_language_code = language_code if loaded_model is not None else None
+
         if self.model is None:
-            logging.error("All model load attempts failed for %s.", MODEL_NAME)
+            logging.error("All model load attempts failed for %s.", model_name)
 
         self.comm.update_icon.emit("idle")
 
@@ -508,15 +606,16 @@ class TalkativeApp:
     def set_icon_state(self, state):
         self.state = state
         self.tray_icon.setIcon(self.create_icon(state))
+        language_label = self.get_current_language_config()["label"]
         
         if state == "recording":
-            self.tray_icon.setToolTip(f"TALKATIVE - Recording... ({HOTKEY_LABEL} to Stop)")
+            self.tray_icon.setToolTip(f"TALKATIVE - Recording {language_label}... ({HOTKEY_LABEL} to Stop)")
             self.recording_indicator.show_animation()
         elif state == "processing":
-            self.tray_icon.setToolTip("TALKATIVE - Processing...")
+            self.tray_icon.setToolTip(f"TALKATIVE - Processing {language_label}...")
             self.recording_indicator.hide_animation()
         else:
-            self.tray_icon.setToolTip(f"TALKATIVE - Idle ({HOTKEY_LABEL} to Record)")
+            self.tray_icon.setToolTip(f"TALKATIVE - Idle {language_label} ({HOTKEY_LABEL} to Record)")
             self.recording_indicator.hide_animation()
 
     def audio_callback(self, indata, frames, time_info, status):
@@ -656,13 +755,23 @@ class TalkativeApp:
 
     def process_audio(self, audio_np):
         processing_started_at = time.perf_counter()
+        model = self.model
+        language_code = self.model_language_code or self.current_language_code
+        language_config = get_language_config(language_code)
+
+        if model is None:
+            logging.info("Skipping transcription because the model is not loaded.")
+            self.comm.update_icon.emit("idle")
+            return
+
         try:
-            segments, info = self.model.transcribe(audio_np, **TRANSCRIBE_OPTIONS)
+            segments, info = model.transcribe(audio_np, **build_transcribe_options(language_config))
             text = self.normalize_transcript_text(" ".join(segment.text for segment in segments))
             logging.info(
-                "Transcription completed in %.2fs for %.2fs of audio.",
+                "Transcription completed in %.2fs for %.2fs of audio using %s.",
                 time.perf_counter() - processing_started_at,
                 len(audio_np) / self.samplerate,
+                language_config["label"],
             )
             logging.info("Transcribed %d characters.", len(text))
             if text:
