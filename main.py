@@ -23,7 +23,7 @@ from PyQt6.QtGui import QFont, QIcon, QPainter, QPixmap, QColor, QLinearGradient
 from PyQt6.QtCore import pyqtSignal, QObject, QRect, QRectF, Qt, QTimer, QPropertyAnimation, QEasingCurve, QPoint, QPointF, QParallelAnimationGroup
 
 ENGLISH_MODEL_NAME = os.getenv("TALKATIVE_MODEL", "small.en")
-CZECH_MODEL_NAME = os.getenv("TALKATIVE_CZECH_MODEL", "turbo")
+CZECH_MODEL_NAME = os.getenv("TALKATIVE_CZECH_MODEL", "medium")
 MODEL_DEVICE = os.getenv("TALKATIVE_DEVICE", "").strip().lower()
 CPU_THREADS = max(1, (os.cpu_count() or 4) - 1)
 HOTKEY = "ctrl+alt"
