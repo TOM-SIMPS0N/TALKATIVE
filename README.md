@@ -15,6 +15,11 @@ TALKATIVE is a free, local speech-to-text tool that types out what you say.
   - **Yellow**: Processing
 - **Instant Typing**: Automatically types the transcribed text into your active window.
 
+## Active Languages
+- **English (`en`)**: Currently active by default through the `base.en` Whisper model.
+
+Other languages are not enabled by default in the current setup.
+
 ## Setup
 Create the virtual environment and install dependencies:
 
