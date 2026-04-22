@@ -1,5 +1,8 @@
 import sys
 import os
+
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+
 import ctypes
 import logging
 import re
@@ -12,6 +15,7 @@ import time
 import random
 from faster_whisper import WhisperModel
 from huggingface_hub import snapshot_download
+from huggingface_hub.utils import disable_progress_bars
 
 from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QWidget, QVBoxLayout, QGraphicsOpacityEffect
 from PyQt6.QtGui import QFont, QIcon, QPainter, QPixmap, QColor, QLinearGradient, QPen, QRadialGradient, QPainterPath, QRegion
@@ -126,6 +130,7 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     filemode='w'
 )
+disable_progress_bars()
 
 def log_error(exctype, value, tb):
     logging.error("Uncaught exception", exc_info=(exctype, value, tb))
@@ -433,6 +438,7 @@ class RecordingIndicator(QWidget):
 
 class Communicator(QObject):
     update_icon = pyqtSignal(str)
+    update_language_menu = pyqtSignal()
     insert_text = pyqtSignal(str)
 
 
@@ -443,6 +449,7 @@ class TalkativeApp:
 
         self.comm = Communicator()
         self.comm.update_icon.connect(self.set_icon_state)
+        self.comm.update_language_menu.connect(self.update_language_menu)
         self.comm.insert_text.connect(self.type_transcribed_text)
 
         # State
@@ -515,18 +522,21 @@ class TalkativeApp:
             self.update_language_menu()
             return
 
+        previous_language_code = self.current_language_code
         self.current_language_code = language_code
-        self.model = None
-        self.model_language_code = None
         self.update_language_menu()
         logging.info("Language changed to %s.", self.get_current_language_config()["label"])
-        self.load_model_async()
+        self.load_model_async(language_code, fallback_language_code=previous_language_code)
 
-    def load_model_async(self):
+    def load_model_async(self, language_code=None, fallback_language_code=None):
         self.model_load_generation += 1
         generation = self.model_load_generation
-        language_code = self.current_language_code
-        threading.Thread(target=self.load_model, args=(language_code, generation), daemon=True).start()
+        language_code = normalize_language_code(language_code or self.current_language_code)
+        threading.Thread(
+            target=self.load_model,
+            args=(language_code, generation, fallback_language_code),
+            daemon=True,
+        ).start()
 
     def update_indicator_amplitude(self):
         if self.recording:
@@ -536,7 +546,7 @@ class TalkativeApp:
         else:
             self.recording_indicator.set_amplitude(0.0)
 
-    def load_model(self, language_code, generation):
+    def load_model(self, language_code, generation, fallback_language_code=None):
         load_started_at = time.perf_counter()
         language_config = get_language_config(language_code)
         model_name = language_config["model_name"]
@@ -546,8 +556,7 @@ class TalkativeApp:
             model_source = resolve_model_source(model_name)
         except Exception:
             logging.error("Failed to resolve Whisper model source for %s.", model_name, exc_info=True)
-            if generation == self.model_load_generation:
-                self.comm.update_icon.emit("idle")
+            self.handle_model_load_failure(language_code, generation, fallback_language_code)
             return
 
         for model_options in build_model_load_candidates():
@@ -574,12 +583,37 @@ class TalkativeApp:
             logging.info("Discarding stale model load for %s.", language_config["label"])
             return
 
-        self.model = loaded_model
-        self.model_language_code = language_code if loaded_model is not None else None
-
-        if self.model is None:
+        if loaded_model is None:
             logging.error("All model load attempts failed for %s.", model_name)
+            self.handle_model_load_failure(language_code, generation, fallback_language_code)
+            return
 
+        self.model = loaded_model
+        self.model_language_code = language_code
+        self.current_language_code = language_code
+        self.comm.update_language_menu.emit()
+
+        self.comm.update_icon.emit("idle")
+
+    def handle_model_load_failure(self, language_code, generation, fallback_language_code=None):
+        if generation != self.model_load_generation:
+            return
+
+        requested_language = get_language_config(language_code)["label"]
+        fallback_language_code = normalize_language_code(fallback_language_code)
+
+        if self.model is not None and self.model_language_code == fallback_language_code:
+            self.current_language_code = fallback_language_code
+            logging.info(
+                "Could not load %s. Reverted to %s.",
+                requested_language,
+                get_language_config(fallback_language_code)["label"],
+            )
+        else:
+            self.model = None
+            self.model_language_code = None
+
+        self.comm.update_language_menu.emit()
         self.comm.update_icon.emit("idle")
 
     def create_icon(self, state):
@@ -627,8 +661,11 @@ class TalkativeApp:
             self.current_amplitude = float(np.max(np.abs(indata)))
 
     def on_hotkey(self):
-        if self.model is None:
-            logging.info("Model is not loaded yet.")
+        if self.model is None or self.model_language_code != self.current_language_code:
+            logging.info(
+                "Model for %s is not loaded yet.",
+                self.get_current_language_config()["label"],
+            )
             return
 
         if self.state == "idle":
