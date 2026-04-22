@@ -22,7 +22,7 @@ from PyQt6.QtGui import QFont, QIcon, QPainter, QPixmap, QColor, QLinearGradient
 from PyQt6.QtCore import pyqtSignal, QObject, QRect, QRectF, Qt, QTimer, QPropertyAnimation, QEasingCurve, QPoint, QPointF, QParallelAnimationGroup
 
 ENGLISH_MODEL_NAME = os.getenv("TALKATIVE_MODEL", "base.en")
-CZECH_MODEL_NAME = os.getenv("TALKATIVE_CZECH_MODEL", "base")
+CZECH_MODEL_NAME = os.getenv("TALKATIVE_CZECH_MODEL", "small")
 MODEL_DEVICE = os.getenv("TALKATIVE_DEVICE", "").strip().lower()
 CPU_THREADS = max(1, (os.cpu_count() or 4) - 1)
 HOTKEY = "ctrl+alt"
@@ -45,6 +45,8 @@ LANGUAGE_CONFIGS = {
         "whisper_language": "en",
         "model_name": ENGLISH_MODEL_NAME,
         "hotwords": HOTWORDS,
+        "cleanup": "english",
+        "transcribe_options": {"beam_size": 2, "best_of": 2},
     },
     "cs": {
         "label": "Czech",
@@ -52,6 +54,12 @@ LANGUAGE_CONFIGS = {
         # Czech needs a multilingual Whisper model. The *.en models only handle English.
         "model_name": CZECH_MODEL_NAME,
         "hotwords": "",
+        "cleanup": "basic",
+        "transcribe_options": {
+            "beam_size": 3,
+            "best_of": 3,
+            "vad_parameters": {"min_silence_duration_ms": 500},
+        },
     },
 }
 LANGUAGE_ALIASES = {
@@ -193,6 +201,7 @@ def get_language_config(language_code):
 def build_transcribe_options(language_config):
     options = dict(BASE_TRANSCRIBE_OPTIONS)
     options["language"] = language_config["whisper_language"]
+    options.update(language_config.get("transcribe_options", {}))
     if language_config["hotwords"]:
         options["hotwords"] = language_config["hotwords"]
     return options
@@ -716,25 +725,28 @@ class TalkativeApp:
         else:
             self.comm.update_icon.emit("idle")
 
-    def normalize_transcript_text(self, text):
+    def normalize_transcript_text(self, text, language_config=None):
         text = text.replace("\r\n", "\n").strip()
         if not text:
             return ""
 
         text = re.sub(r"[ \t]+", " ", text)
-        text = self.apply_dictation_replacements(text, DICTATION_TEXT_REPLACEMENTS)
-        text = self.apply_dictation_replacements(text, DICTATION_SYMBOL_REPLACEMENTS)
+        if (language_config or {}).get("cleanup") == "english":
+            text = self.apply_dictation_replacements(text, DICTATION_TEXT_REPLACEMENTS)
+            text = self.apply_dictation_replacements(text, DICTATION_SYMBOL_REPLACEMENTS)
         text = re.sub(r"[ \t]*\n[ \t]*", "\n", text)
         text = re.sub(r"\n{3,}", "\n\n", text)
         text = re.sub(r"\s+([,.;:!?])", r"\1", text)
         text = re.sub(r"([(\[{])\s+", r"\1", text)
         text = re.sub(r"\s+([)\]}])", r"\1", text)
         text = re.sub(r"\s*([_-])\s*", r"\1", text)
-        text = re.sub(r"([,:;!?])([A-Za-z])", r"\1 \2", text)
-        text = re.sub(r"\b(i)\b", "I", text)
-        text = re.sub(r"\bi('(?:m|d|ll|ve|re|s))\b", lambda match: "I" + match.group(1), text, flags=re.IGNORECASE)
+        text = re.sub(r"([,:;!?])(\S)", r"\1 \2", text)
+        if (language_config or {}).get("cleanup") == "english":
+            text = re.sub(r"\b(i)\b", "I", text)
+            text = re.sub(r"\bi('(?:m|d|ll|ve|re|s))\b", lambda match: "I" + match.group(1), text, flags=re.IGNORECASE)
         text = self.capitalize_sentences(text)
-        text = self.apply_dictation_replacements(text, DICTATION_TEXT_REPLACEMENTS)
+        if (language_config or {}).get("cleanup") == "english":
+            text = self.apply_dictation_replacements(text, DICTATION_TEXT_REPLACEMENTS)
         return text
 
     def apply_dictation_replacements(self, text, replacements):
@@ -803,7 +815,10 @@ class TalkativeApp:
 
         try:
             segments, info = model.transcribe(audio_np, **build_transcribe_options(language_config))
-            text = self.normalize_transcript_text(" ".join(segment.text for segment in segments))
+            text = self.normalize_transcript_text(
+                " ".join(segment.text for segment in segments),
+                language_config,
+            )
             logging.info(
                 "Transcription completed in %.2fs for %.2fs of audio using %s.",
                 time.perf_counter() - processing_started_at,
